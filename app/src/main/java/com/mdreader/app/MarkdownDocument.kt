@@ -10,16 +10,43 @@ sealed class MdBlock {
 private val headingRegex = Regex("^(#{1,6})\\s+(.*)$")
 
 /**
+ * Delimitatore di una fence di codice: carattere (backtick o tilde) e lunghezza del
+ * run di apertura. Una fence si chiude solo con lo stesso carattere ripetuto almeno
+ * quel numero di volte (regola CommonMark) - questo evita che una fence annidata piu'
+ * corta (es. ``` dentro una ````) chiuda prematuramente quella esterna.
+ */
+private data class FenceMarker(val char: Char, val length: Int)
+
+private fun openingFence(line: String): FenceMarker? {
+    val trimmed = line.trim()
+    val char = trimmed.firstOrNull() ?: return null
+    if (char != '`' && char != '~') return null
+    val runLength = trimmed.takeWhile { it == char }.length
+    if (runLength < 3) return null
+    // Le fence a backtick non possono contenere altri backtick nella info string.
+    if (char == '`' && trimmed.drop(runLength).contains('`')) return null
+    return FenceMarker(char, runLength)
+}
+
+private fun isClosingFence(line: String, opening: FenceMarker): Boolean {
+    val trimmed = line.trim()
+    if (trimmed.firstOrNull() != opening.char) return false
+    val runLength = trimmed.takeWhile { it == opening.char }.length
+    return runLength >= opening.length && trimmed.drop(runLength).isBlank()
+}
+
+/**
  * Divide il documento in una sequenza di blocchi "prosa" (testo, liste, tabelle...) e
- * blocchi "codice" (```...```), separati cosi' da poter dare ai blocchi di codice uno
- * scroll orizzontale indipendente senza forzare il wrap del testo normale. Ogni blocco
- * prosa che inizia con un titolo (# .. ######) espone l'HeadingInfo per l'outline.
+ * blocchi "codice" (```...``` o ~~~...~~~), separati cosi' da poter dare ai blocchi di
+ * codice uno scroll orizzontale indipendente senza forzare il wrap del testo normale.
+ * Ogni blocco prosa che inizia con un titolo (# .. ######) espone l'HeadingInfo per
+ * l'outline.
  */
 fun splitMarkdownIntoBlocks(markdown: String): List<MdBlock> {
     val blocks = mutableListOf<MdBlock>()
     var currentLines = mutableListOf<String>()
     var currentHeading: HeadingInfo? = null
-    var insideCodeFence = false
+    var openFence: FenceMarker? = null
 
     fun flushProse() {
         if (currentLines.isNotEmpty()) {
@@ -37,22 +64,24 @@ fun splitMarkdownIntoBlocks(markdown: String): List<MdBlock> {
     }
 
     for (line in markdown.lines()) {
-        val isFenceMarker = line.trim().startsWith("```")
+        val fence = openFence
 
-        if (isFenceMarker && !insideCodeFence) {
-            flushProse()
-            insideCodeFence = true
-            currentLines.add(line)
-            continue
-        }
-        if (isFenceMarker && insideCodeFence) {
+        if (fence == null) {
+            val opening = openingFence(line)
+            if (opening != null) {
+                flushProse()
+                openFence = opening
+                currentLines.add(line)
+                continue
+            }
+        } else if (isClosingFence(line, fence)) {
             currentLines.add(line)
             flushCode()
-            insideCodeFence = false
+            openFence = null
             continue
         }
 
-        if (!insideCodeFence) {
+        if (openFence == null) {
             val match = headingRegex.find(line)
             if (match != null) {
                 flushProse()
@@ -62,7 +91,7 @@ fun splitMarkdownIntoBlocks(markdown: String): List<MdBlock> {
         currentLines.add(line)
     }
 
-    if (insideCodeFence) flushCode() else flushProse()
+    if (openFence != null) flushCode() else flushProse()
 
     return blocks
 }
