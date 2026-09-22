@@ -1,8 +1,10 @@
 package com.mdreader.app
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
 import android.widget.TextView
@@ -23,14 +25,18 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -74,7 +80,12 @@ private fun buildMarkwon(context: Context, darkTheme: Boolean): Markwon {
 }
 
 private fun readTextFromUri(context: Context, uri: Uri): String? =
-    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+    try {
+        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+    } catch (e: Exception) {
+        Log.e("MdReader", "Impossibile leggere il file: $uri", e)
+        null
+    }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,7 +93,9 @@ fun ReaderApp() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val listState: LazyListState = rememberLazyListState()
+    val snackbarHostState = remember { SnackbarHostState() }
 
+    var documentUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var markdownText by remember { mutableStateOf(SAMPLE_MARKDOWN) }
     var outlineExpanded by remember { mutableStateOf(false) }
 
@@ -93,15 +106,38 @@ fun ReaderApp() {
         }
     }
 
+    // Riapre l'ultimo documento anche dopo la ricreazione dell'Activity (rotazione,
+    // process death): salviamo solo lo Uri (piccolo) e ricarichiamo il testo qui,
+    // invece di mettere l'intero contenuto del file in rememberSaveable.
+    LaunchedEffect(documentUri) {
+        val uri = documentUri ?: return@LaunchedEffect
+        val text = readTextFromUri(context, uri)
+        if (text != null) {
+            markdownText = text
+        } else {
+            snackbarHostState.showSnackbar("Impossibile aprire il file. Riprova.")
+            documentUri = null
+        }
+    }
+
     val openDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            readTextFromUri(context, uri)?.let { text -> markdownText = text }
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: SecurityException) {
+                Log.w("MdReader", "Permesso persistente non supportato per $uri", e)
+            }
+            documentUri = uri
         }
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("MD Reader") },
